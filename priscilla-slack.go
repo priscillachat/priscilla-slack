@@ -12,6 +12,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -57,6 +59,12 @@ type slackUser struct {
 	Profile userProfile `json:"profile"`
 }
 
+type apiRespUser struct {
+	Ok    bool       `json:"ok"`
+	User  *slackUser `json:"user"`
+	Error string     `json:"error"`
+}
+
 type slackClient struct {
 	name           string
 	id             string
@@ -67,15 +75,17 @@ type slackClient struct {
 	usersByID      map[string]*slackUser
 	channelsByName map[string]*slackChannel
 	channelsByID   map[string]*slackChannel
+	aMention       string
+	messageCounter uint64
 }
 
 type slackMessage struct {
 	ID        uint64 `json:"id"`
 	Channel   string `json:"channel"`
 	Type      string `json:"type"`
-	User      string `json:"user"`
+	User      string `json:"user,omitempty"`
 	Text      string `json:"text"`
-	Timestamp string `json:"ts"`
+	Timestamp string `json:"ts,omitempty"`
 }
 
 var logger *prislog.PrisLog
@@ -152,6 +162,63 @@ func run(priscilla *prisclient.Client, slack *slackClient) {
 			logger.Debug.Println("text:", msg.Text)
 			logger.Debug.Println("channel:", msg.Channel)
 			logger.Debug.Println("timestamp:", msg.Timestamp)
+			if msg.Type == "message" {
+				var chanName, userName string
+				if msg.Channel != "" {
+					if ch, ok := slack.channelsByID[msg.Channel]; ok {
+						logger.Debug.Println("decoded channel:", ch.Name)
+						chanName = ch.Name
+					}
+				}
+				if msg.User != "" {
+					if user, ok := slack.usersByID[msg.User]; ok {
+						logger.Debug.Println("decoded user:",
+							user.Profile.RealName)
+						userName = user.Profile.RealName
+					} else {
+						err := slack.populateUser(msg.User)
+						if err == nil {
+							userName = user.Profile.RealName
+						}
+					}
+				}
+				if chanName != "" && userName != "" {
+					mentioned, err := regexp.MatchString(slack.aMention,
+						msg.Text)
+					if err != nil {
+						logger.Error.Println("Error searching mention:", err)
+					}
+
+					slackUser := slack.usersByID[msg.User]
+
+					clientQuery := prisclient.Query{
+						Type: "message",
+						To:   "server",
+						Message: &prisclient.MessageBlock{
+							Message:   msg.Text,
+							From:      userName,
+							Room:      chanName,
+							Mentioned: mentioned,
+							Stripped: strings.Replace(msg.Text, slack.aMention,
+								"", -1),
+							User: &prisclient.UserInfo{
+								Id:      msg.User,
+								Name:    userName,
+								Mention: slackUser.Name,
+								Email:   slackUser.Profile.Email,
+							},
+						},
+					}
+
+					toPris <- &clientQuery
+				}
+			}
+		case query := <-fromPris:
+			logger.Debug.Println("Query received:", *query)
+			switch query.Type {
+			case "message":
+				slack.sendMessage(query.Message)
+			}
 		case <-keepAlive:
 			websocket.JSON.Send(slack.ws, slackPing{Type: "ping"})
 		}
@@ -208,6 +275,10 @@ func (slack *slackClient) connect() error {
 
 	slack.name = startObj.Self.Name
 	slack.id = startObj.Self.ID
+	slack.aMention = "<@" + slack.id + ">"
+
+	logger.Debug.Println("Bot name:", slack.name)
+	logger.Debug.Println("Bot ID:", slack.id)
 
 	slack.ws, err = websocket.Dial(startObj.Url, "", SlackAPI)
 
@@ -258,4 +329,88 @@ func (slack *slackClient) listen(msgOut chan<- *slackMessage) {
 		websocket.JSON.Receive(slack.ws, msg)
 		msgOut <- msg
 	}
+}
+
+func (slack *slackClient) apiGet(path string,
+	params map[string]string) ([]byte, error) {
+	if slack.api == nil {
+		slack.api = &http.Client{}
+	}
+
+	req, err := http.NewRequest("GET", SlackAPI+path, nil)
+	q := req.URL.Query()
+	q.Add("token", slack.token)
+
+	for name, value := range params {
+		q.Add(name, value)
+	}
+
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := slack.api.Do(req)
+
+	if err != nil {
+		logger.Error.Println("Error calling slack API [", path, "]:", err)
+		return []byte{}, err
+	}
+
+	logger.Debug.Println("API called:", path)
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		logger.Error.Println("Not 200 [", path, "]:", resp.StatusCode)
+		return []byte{}, errors.New("API did not return 200")
+	}
+
+	return ioutil.ReadAll(resp.Body)
+}
+
+func (slack *slackClient) populateUser(id string) error {
+	body, err := slack.apiGet("user.info", map[string]string{"user": id})
+
+	if err != nil {
+		logger.Error.Println("Error retrieving user during API call:", err)
+		return err
+	}
+
+	var apiResp apiRespUser
+
+	err = json.Unmarshal(body, &apiResp)
+
+	if err != nil {
+		logger.Error.Println("Unable to decode user info response:", err)
+		return err
+	}
+
+	if !apiResp.Ok {
+		logger.Error.Println("API returned error:", apiResp.Error)
+	}
+
+	slack.usersByName[apiResp.User.Name] = apiResp.User
+	slack.usersByID[apiResp.User.ID] = apiResp.User
+
+	return nil
+}
+
+func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
+
+	slack.messageCounter++
+
+	slackMsg := slackMessage{
+		ID:      slack.messageCounter,
+		Channel: slack.channelsByName[message.Room].ID,
+		Type:    "message",
+		Text:    message.Message,
+	}
+
+	if len(message.MentionNotify) > 0 {
+		for _, name := range message.MentionNotify {
+			if user, ok := slack.usersByName[name]; ok {
+				slackMsg.Text += " @" + user.Name
+			}
+		}
+	}
+
+	return websocket.JSON.Send(slack.ws, &slackMsg)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/priscillachat/prislog"
 	"golang.org/x/net/websocket"
 	_ "gopkg.in/yaml.v2"
+	"html"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -73,6 +74,8 @@ type slackClient struct {
 	ws             *websocket.Conn
 	usersByName    map[string]*slackUser
 	usersByID      map[string]*slackUser
+	usersByMention map[string]*slackUser
+	usersByEmail   map[string]*slackUser
 	channelsByName map[string]*slackChannel
 	channelsByID   map[string]*slackChannel
 	aMention       string
@@ -131,6 +134,8 @@ func main() {
 	slack := &slackClient{
 		token:          *token,
 		usersByName:    make(map[string]*slackUser),
+		usersByMention: make(map[string]*slackUser),
+		usersByEmail:   make(map[string]*slackUser),
 		usersByID:      make(map[string]*slackUser),
 		channelsByName: make(map[string]*slackChannel),
 		channelsByID:   make(map[string]*slackChannel),
@@ -190,6 +195,9 @@ func run(priscilla *prisclient.Client, slack *slackClient) {
 					}
 
 					slackUser := slack.usersByID[msg.User]
+					stripped :=
+						strings.Replace(msg.Text, slack.aMention, "", -1)
+					unescapedText := html.UnescapeString(stripped)
 
 					clientQuery := prisclient.Query{
 						Type: "message",
@@ -199,8 +207,7 @@ func run(priscilla *prisclient.Client, slack *slackClient) {
 							From:      userName,
 							Room:      chanName,
 							Mentioned: mentioned,
-							Stripped: strings.Replace(msg.Text, slack.aMention,
-								"", -1),
+							Stripped:  unescapedText,
 							User: &prisclient.UserInfo{
 								Id:      msg.User,
 								Name:    userName,
@@ -295,8 +302,13 @@ func (slack *slackClient) connect() error {
 	}
 
 	for _, user := range startObj.Users {
-		slack.usersByName[user.Name] = user
+		slack.usersByName[user.Profile.RealName] = user
+		slack.usersByMention[user.Name] = user
 		slack.usersByID[user.ID] = user
+
+		if user.Profile.Email != "" {
+			slack.usersByEmail[user.Profile.Email] = user
+		}
 
 		logger.Debug.Println("Found user:", *user)
 		logger.Debug.Println("User profile:", user.Profile)
@@ -401,13 +413,15 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 		ID:      slack.messageCounter,
 		Channel: slack.channelsByName[message.Room].ID,
 		Type:    "message",
-		Text:    message.Message,
+		Text:    html.EscapeString(message.Message),
 	}
 
 	if len(message.MentionNotify) > 0 {
 		for _, name := range message.MentionNotify {
+			logger.Debug.Println("Requested to mention:", name)
 			if user, ok := slack.usersByName[name]; ok {
-				slackMsg.Text += " @" + user.Name
+				logger.Debug.Println("Mention user found:", user.Name)
+				slackMsg.Text += " <@" + user.ID + ">"
 			}
 		}
 	}

@@ -1,0 +1,9 @@
+github.com/priscillachat/prisclient v0.0.0-20160707000256-350f4cd33f32 h1:L1KE42W2pdk1cPWdgJP9rd2DuoU+Gv2/2Ld+7VZWU0w=
+github.com/priscillachat/prisclient v0.0.0-20160707000256-350f4cd33f32/go.mod h1:105aVQXz4Odgp1RQ3Z1Bu3TR19UbEU5Zsx3obMuB13Q=
+github.com/priscillachat/prislog v0.0.0-20160522054125-59dcf8a743ff h1:CV8EqMgQ1wsPDKT8KpriWlB4UgiWMy/TWvHMTyFaL/I=
+github.com/priscillachat/prislog v0.0.0-20160522054125-59dcf8a743ff/go.mod h1:OMN3nNYclLRH2M9qpGRQ6Jgl+lyf9MKGZ1rUh2nnLBM=
+golang.org/x/net v0.0.0-20190110200230-915654e7eabc h1:Yx9JGxI1SBhVLFjpAkWMaO1TF+xyqtHLjZpvQboJGiM=
+golang.org/x/net v0.0.0-20190110200230-915654e7eabc/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/yaml.v2 v2.2.2 h1:ZCJp+EgiOT7lHqUV2J862kp8Qj64Jo6az82+3Td9dZw=
+gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=

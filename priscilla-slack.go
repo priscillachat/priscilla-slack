@@ -5,10 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/priscillachat/prisclient"
-	"github.com/priscillachat/prislog"
-	"golang.org/x/net/websocket"
-	_ "gopkg.in/yaml.v2"
 	"html"
 	"io/ioutil"
 	"net/http"
@@ -16,6 +12,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/priscillachat/prisclient"
+	"github.com/priscillachat/prislog"
+	"golang.org/x/net/websocket"
+	"gopkg.in/yaml.v2"
 )
 
 const (
@@ -24,7 +25,7 @@ const (
 
 type slackStart struct {
 	Ok       bool            `json:"ok"`
-	Url      string          `json:"url"`
+	URL      string          `json:"url"`
 	Error    string          `json:"error"`
 	Self     slackStartSelf  `json:"self"`
 	Users    []*slackUser    `json:"users"`
@@ -91,48 +92,31 @@ type slackMessage struct {
 	Timestamp string `json:"ts,omitempty"`
 }
 
-var logger *prislog.PrisLog
+type config struct {
+	Port     int                      `yaml:"port"`
+	Secret   string                   `yaml:"secret"`
+	Adapters map[string]adapterConfig `yaml:"adapters"`
+}
 
-func main() {
-	token := flag.String("token", "", "slack bot token")
-	server := flag.String("server", "127.0.0.1", "priscilla server")
-	port := flag.String("port", "4517", "priscilla server port")
-	sourceid := flag.String("id", "priscilla-slack", "source id")
-	loglevel := flag.String("loglevel", "warn", "loglevel")
-	secret := flag.String("secret", "abcdefg", "secret for priscilla server")
-	logfile := flag.String("logfile", "STDOUT", "Log file")
+type adapterConfig struct {
+	Params map[string]*string `yaml:"params"`
+}
+
+var logger *prislog.PrisLog
+var slack *slackClient
+var priscilla *prisclient.Client
+
+func init() {
+	confFile := flag.String("conf", "",
+		"Use Priscilla config file, command line overrides options inside")
+	confName := flag.String("confname", "",
+		"Name of the config subsection (under \"adapters\")")
 
 	flag.Parse()
 
-	var err error
-
-	var logwriter *os.File
-
-	if *logfile == "STDOUT" {
-		logwriter = os.Stdout
-	} else {
-		logwriter, err = os.OpenFile(*logfile,
-			os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-		if err != nil {
-			fmt.Println("Unable to write to log file", *logfile, ":", err)
-			os.Exit(1)
-		}
-		defer logwriter.Close()
-	}
-
-	logger, err = prislog.NewLogger(logwriter, *loglevel)
-
-	if err != nil {
-		fmt.Println("Error initializing logger: ", err)
-		os.Exit(-1)
-	}
-
-	if *token == "" {
-		logger.Error.Fatal("No token specified")
-	}
-
-	slack := &slackClient{
-		token:          *token,
+	// initialize sslack client
+	slack = &slackClient{
+		token:          "",
 		usersByName:    make(map[string]*slackUser),
 		usersByMention: make(map[string]*slackUser),
 		usersByEmail:   make(map[string]*slackUser),
@@ -141,13 +125,117 @@ func main() {
 		channelsByID:   make(map[string]*slackChannel),
 	}
 
-	priscilla, err := prisclient.NewClient(*server, *port, "adapter",
-		*sourceid, *secret, true, logger)
+	// place holder for decoding config file
+	var conf config
+	var err error
 
-	run(priscilla, slack)
+	if *confFile != "" && *confName != "" {
+		confRaw, err := ioutil.ReadFile(*confFile)
+
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading config file", err)
+			os.Exit(1)
+		}
+
+		err = yaml.Unmarshal(confRaw, &conf)
+
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error parsing config file", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "conf and confname are required")
+		os.Exit(1)
+	}
+
+	fmt.Println("conf loaded:", conf)
+
+	server := "127.0.0.1"
+	port := "4517"
+	sourceID := "priscilla-slack"
+	secret := "abcdefg"
+	loglevel := "warn"
+	logfile := "STDOUT"
+
+	if conf.Port != 0 {
+		port = fmt.Sprintf("%d", conf.Port)
+	}
+
+	if conf.Secret != "" {
+		secret = conf.Secret
+	}
+
+	if adapterConf, ok := conf.Adapters[*confName]; ok {
+		for key, value := range adapterConf.Params {
+			switch key {
+			case "token":
+				slack.token = *value
+			case "server":
+				server = *value
+			case "sourceId":
+				sourceID = *value
+			case "loglevel":
+				loglevel = *value
+			case "logfile":
+				logfile = *value
+			}
+		}
+	}
+
+	// log destination
+	var logwriter *os.File
+
+	if logfile == "STDOUT" {
+		logwriter = os.Stdout
+	} else {
+		logwriter, err = os.OpenFile(logfile,
+			os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Println("Unable to write to log file", logfile, ":", err)
+			os.Exit(1)
+		}
+		defer logwriter.Close()
+	}
+
+	logger, err = prislog.NewLogger(logwriter, loglevel)
+
+	if err != nil {
+		fmt.Println("Error initializing logger:", err)
+		os.Exit(-1)
+	}
+
+	logger.Debug.Println("end of initialization, slack:", slack)
+
+	priscilla, err = prisclient.NewClient(server, port, "adapter",
+		sourceID, secret, true, logger)
+
+	if err != nil {
+		logger.Error.Fatal("Error initializing priscilla client:", err)
+	}
 }
 
-func run(priscilla *prisclient.Client, slack *slackClient) {
+func main() {
+
+	// start the client
+	run()
+}
+
+func (slack *slackClient) String() (formatted string) {
+	formatted += fmt.Sprint(
+		"{",
+		"name:", slack.name,
+		"id:", slack.id,
+		"token:", "[masked]",
+		"api:", slack.api,
+		"ws:", slack.ws,
+		"aMention:", slack.aMention,
+		"messageCounter:", slack.messageCounter,
+		"}",
+	)
+	return
+}
+
+func run() {
 	messageFromSlack := make(chan *slackMessage)
 	go slack.listen(messageFromSlack)
 
@@ -287,7 +375,7 @@ func (slack *slackClient) connect() error {
 	logger.Debug.Println("Bot name:", slack.name)
 	logger.Debug.Println("Bot ID:", slack.id)
 
-	slack.ws, err = websocket.Dial(startObj.Url, "", SlackAPI)
+	slack.ws, err = websocket.Dial(startObj.URL, "", SlackAPI)
 
 	if err != nil {
 		logger.Error.Println("Error connecting to websocket:", err)

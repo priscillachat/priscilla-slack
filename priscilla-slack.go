@@ -23,13 +23,11 @@ const (
 	SlackAPI = "https://slack.com/api/"
 )
 
-type slackStart struct {
-	Ok       bool            `json:"ok"`
-	URL      string          `json:"url"`
-	Error    string          `json:"error"`
-	Self     slackStartSelf  `json:"self"`
-	Users    []*slackUser    `json:"users"`
-	Channels []*slackChannel `json:"channels"`
+type slackConnect struct {
+	Ok    bool             `json:"ok"`
+	URL   string           `json:"url"`
+	Error string           `json:"error"`
+	Self  slackConnectSelf `json:"self"`
 }
 
 type slackPing struct {
@@ -37,15 +35,36 @@ type slackPing struct {
 	Type string `json:"type"`
 }
 
-type slackStartSelf struct {
+type slackConnectSelf struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-type slackChannel struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	IsMember bool   `json:"is_member"`
+type slackConversation struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsChannel bool   `json:"is_channel"`
+	IsGroup   bool   `json:"is_group"`
+	IsIm      bool   `json:"is_im"`
+	IsMember  bool   `json:"is_member"`
+	IsPrivate bool   `json:"is_private`
+	IsMpim    bool   `json:"is_mpim"`
+}
+
+type apiRespMetadata struct {
+	NextCursor string `json:"next_cursor"`
+}
+type apiRespConversations struct {
+	Ok            bool                 `json:"ok"`
+	Conversations []*slackConversation `json:"channels"`
+	RespMetadata  apiRespMetadata      `json:"response_metadata"`
+	Error         string               `json:"error"`
+}
+
+type apiRespConversation struct {
+	Ok           bool               `json:"ok"`
+	Conversation *slackConversation `json:"channel"`
+	Error        string             `json:"error"`
 }
 
 type userProfile struct {
@@ -68,19 +87,19 @@ type apiRespUser struct {
 }
 
 type slackClient struct {
-	name           string
-	id             string
-	token          string
-	api            *http.Client
-	ws             *websocket.Conn
-	usersByName    map[string]*slackUser
-	usersByID      map[string]*slackUser
-	usersByMention map[string]*slackUser
-	usersByEmail   map[string]*slackUser
-	channelsByName map[string]*slackChannel
-	channelsByID   map[string]*slackChannel
-	aMention       string
-	messageCounter uint64
+	name               string
+	id                 string
+	token              string
+	api                *http.Client
+	ws                 *websocket.Conn
+	userByName         map[string]*slackUser
+	userByID           map[string]*slackUser
+	userByMention      map[string]*slackUser
+	userByEmail        map[string]*slackUser
+	conversationByName map[string]*slackConversation
+	conversationByID   map[string]*slackConversation
+	aMention           string
+	messageCounter     uint64
 }
 
 type slackMessage struct {
@@ -116,13 +135,13 @@ func init() {
 
 	// initialize sslack client
 	slack = &slackClient{
-		token:          "",
-		usersByName:    make(map[string]*slackUser),
-		usersByMention: make(map[string]*slackUser),
-		usersByEmail:   make(map[string]*slackUser),
-		usersByID:      make(map[string]*slackUser),
-		channelsByName: make(map[string]*slackChannel),
-		channelsByID:   make(map[string]*slackChannel),
+		token:              "",
+		userByName:         make(map[string]*slackUser),
+		userByMention:      make(map[string]*slackUser),
+		userByEmail:        make(map[string]*slackUser),
+		userByID:           make(map[string]*slackUser),
+		conversationByName: make(map[string]*slackConversation),
+		conversationByID:   make(map[string]*slackConversation),
 	}
 
 	// place holder for decoding config file
@@ -220,19 +239,58 @@ func main() {
 	run()
 }
 
-func (slack *slackClient) String() (formatted string) {
-	formatted += fmt.Sprint(
+func (slack *slackClient) String() string {
+	return fmt.Sprint(
 		"{",
-		"name:", slack.name,
-		"id:", slack.id,
-		"token:", "[masked]",
-		"api:", slack.api,
-		"ws:", slack.ws,
-		"aMention:", slack.aMention,
+		"name:", slack.name, ", ",
+		"id:", slack.id, ", ",
+		"token:", "[masked]", ", ",
+		"api:", slack.api, ", ",
+		"ws:", slack.ws, ", ",
+		"aMention:", slack.aMention, ", ",
 		"messageCounter:", slack.messageCounter,
 		"}",
 	)
-	return
+}
+
+func (conversation *slackConversation) String() string {
+	return fmt.Sprint(
+		"{",
+		"id:", conversation.ID, ", ",
+		"name:", conversation.Name, ", ",
+		"is_channel:", conversation.IsChannel, ", ",
+		"is_group:", conversation.IsGroup, ", ",
+		"is_im:", conversation.IsIm, ", ",
+		"is_member:", conversation.IsMember, ", ",
+		"is_private:", conversation.IsPrivate, ", ",
+		"is_mpim:", conversation.IsMpim,
+		"}",
+	)
+}
+
+func (user *slackUser) String() string {
+	return fmt.Sprint(
+		"{",
+		"id:", user.ID, ", ",
+		"name:", user.Name, ", ",
+		"first_name:", user.Profile.FirstName, ", ",
+		"last_name:", user.Profile.LastName, ", ",
+		"real_name:", user.Profile.RealName, ", ",
+		"email:", user.Profile.Email,
+		"}",
+	)
+}
+
+func (message *slackMessage) String() string {
+	return fmt.Sprint(
+		"{",
+		"id:", message.ID, ", ",
+		"channel:", message.Channel, ", ",
+		"type:", message.Type, ", ",
+		"user:", message.User, ", ",
+		"text:", message.Text, ", ",
+		"timestamp:", message.Timestamp, ", ",
+	)
 }
 
 func run() {
@@ -249,6 +307,7 @@ func run() {
 	for {
 		select {
 		case msg := <-messageFromSlack:
+			logger.Debug.Println("raw:", msg)
 			logger.Debug.Println("id:", msg.ID)
 			logger.Debug.Println("type:", msg.Type)
 			logger.Debug.Println("user:", msg.User)
@@ -258,20 +317,25 @@ func run() {
 			if msg.Type == "message" {
 				var chanName, userName string
 				if msg.Channel != "" {
-					if ch, ok := slack.channelsByID[msg.Channel]; ok {
+					if ch, ok := slack.conversationByID[msg.Channel]; ok {
 						logger.Debug.Println("decoded channel:", ch.Name)
 						chanName = ch.Name
+					} else {
+						err := slack.populateConversation(msg.Channel)
+						if err == nil {
+							chanName = slack.conversationByID[msg.Channel].Name
+						}
 					}
 				}
 				if msg.User != "" {
-					if user, ok := slack.usersByID[msg.User]; ok {
+					if user, ok := slack.userByID[msg.User]; ok {
 						logger.Debug.Println("decoded user:",
 							user.Profile.RealName)
 						userName = user.Profile.RealName
 					} else {
 						err := slack.populateUser(msg.User)
 						if err == nil {
-							userName = user.Profile.RealName
+							userName = slack.userByID[msg.User].Profile.RealName
 						}
 					}
 				}
@@ -282,7 +346,7 @@ func run() {
 						logger.Error.Println("Error searching mention:", err)
 					}
 
-					slackUser := slack.usersByID[msg.User]
+					slackUser := slack.userByID[msg.User]
 					stripped :=
 						strings.Replace(msg.Text, slack.aMention, "", -1)
 					unescapedText := html.UnescapeString(stripped)
@@ -306,6 +370,9 @@ func run() {
 					}
 
 					toPris <- &clientQuery
+				} else {
+					logger.Info.Println(
+						"Missing chanName or userName, not activating")
 				}
 			}
 		case query := <-fromPris:
@@ -325,7 +392,7 @@ func (slack *slackClient) connect() error {
 		slack.api = &http.Client{}
 	}
 
-	req, err := http.NewRequest("GET", SlackAPI+"rtm.start", nil)
+	req, err := http.NewRequest("GET", SlackAPI+"rtm.connect", nil)
 	q := req.URL.Query()
 	q.Add("token", slack.token)
 	q.Add("simple_latest", "true")
@@ -354,53 +421,35 @@ func (slack *slackClient) connect() error {
 		return err
 	}
 
-	var startObj slackStart
+	var connectObject slackConnect
 
-	err = json.Unmarshal(body, &startObj)
+	err = json.Unmarshal(body, &connectObject)
 
 	if err != nil {
 		logger.Error.Println("Unable to decode response", err)
 		return err
 	}
 
-	if !startObj.Ok {
-		logger.Error.Println("API returned error:", startObj.Error)
-		return errors.New(startObj.Error)
+	if !connectObject.Ok {
+		logger.Error.Println("API returned error:", connectObject.Error)
+		return errors.New(connectObject.Error)
 	}
 
-	slack.name = startObj.Self.Name
-	slack.id = startObj.Self.ID
+	slack.name = connectObject.Self.Name
+	slack.id = connectObject.Self.ID
 	slack.aMention = "<@" + slack.id + ">"
 
 	logger.Debug.Println("Bot name:", slack.name)
 	logger.Debug.Println("Bot ID:", slack.id)
 
-	slack.ws, err = websocket.Dial(startObj.URL, "", SlackAPI)
+	slack.ws, err = websocket.Dial(connectObject.URL, "", SlackAPI)
 
 	if err != nil {
 		logger.Error.Println("Error connecting to websocket:", err)
 		return err
 	}
 
-	for _, channel := range startObj.Channels {
-		slack.channelsByName[channel.Name] = channel
-		slack.channelsByID[channel.ID] = channel
-
-		logger.Debug.Println("Found channel:", *channel)
-	}
-
-	for _, user := range startObj.Users {
-		slack.usersByName[user.Profile.RealName] = user
-		slack.usersByMention[user.Name] = user
-		slack.usersByID[user.ID] = user
-
-		if user.Profile.Email != "" {
-			slack.usersByEmail[user.Profile.Email] = user
-		}
-
-		logger.Debug.Println("Found user:", *user)
-		logger.Debug.Println("User profile:", user.Profile)
-	}
+	slack.populateConversations()
 
 	return nil
 }
@@ -467,7 +516,7 @@ func (slack *slackClient) apiGet(path string,
 }
 
 func (slack *slackClient) populateUser(id string) error {
-	body, err := slack.apiGet("user.info", map[string]string{"user": id})
+	body, err := slack.apiGet("users.info", map[string]string{"user": id})
 
 	if err != nil {
 		logger.Error.Println("Error retrieving user during API call:", err)
@@ -487,10 +536,84 @@ func (slack *slackClient) populateUser(id string) error {
 		logger.Error.Println("API returned error:", apiResp.Error)
 	}
 
-	slack.usersByName[apiResp.User.Name] = apiResp.User
-	slack.usersByID[apiResp.User.ID] = apiResp.User
+	logger.Debug.Println("Found user:", apiResp.User)
+	slack.userByName[apiResp.User.Profile.RealName] = apiResp.User
+	slack.userByID[apiResp.User.ID] = apiResp.User
+	slack.userByMention[apiResp.User.Name] = apiResp.User
+	if apiResp.User.Profile.Email != "" {
+		slack.userByEmail[apiResp.User.Profile.Email] = apiResp.User
+	}
 
 	return nil
+}
+func (slack *slackClient) populateConversation(id string) error {
+	body, err := slack.apiGet("conversations.info",
+		map[string]string{"channel": id})
+
+	if err != nil {
+		logger.Error.Println("Error retrieving user during API call:", err)
+		return err
+	}
+
+	var apiResp apiRespConversation
+
+	err = json.Unmarshal(body, &apiResp)
+
+	if err != nil {
+		logger.Error.Println("Unable to decode conversation info response:", err)
+		return err
+	}
+
+	if !apiResp.Ok {
+		logger.Error.Println("API returned error:", apiResp.Error)
+		return err
+	}
+
+	logger.Debug.Println("Found conversation:", apiResp.Conversation)
+
+	slack.conversationByName[apiResp.Conversation.Name] = apiResp.Conversation
+	slack.conversationByID[apiResp.Conversation.ID] = apiResp.Conversation
+
+	return nil
+}
+func (slack *slackClient) populateConversations() error {
+
+	request := map[string]string{"limit": "1000"}
+	for {
+		body, err := slack.apiGet("conversations.list", request)
+		if err != nil {
+			logger.Error.Println(
+				"Error listing conversations during API call:", err)
+			return err
+		}
+
+		apiResp := new(apiRespConversations)
+
+		err = json.Unmarshal(body, apiResp)
+
+		if err != nil {
+			logger.Error.Println("Unable to decode conversation list:", err)
+			return err
+		}
+
+		if !apiResp.Ok {
+			logger.Error.Println("conversation API returned error:",
+				apiResp.Error)
+			return err
+		}
+
+		for _, conv := range apiResp.Conversations {
+			logger.Debug.Println("Found conversation:", conv)
+			slack.conversationByName[conv.Name] = conv
+			slack.conversationByID[conv.ID] = conv
+		}
+
+		if apiResp.RespMetadata.NextCursor == "" {
+			return nil
+		}
+		request["cursor"] = apiResp.RespMetadata.NextCursor
+
+	}
 }
 
 func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
@@ -499,7 +622,7 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 
 	slackMsg := slackMessage{
 		ID:      slack.messageCounter,
-		Channel: slack.channelsByName[message.Room].ID,
+		Channel: slack.conversationByName[message.Room].ID,
 		Type:    "message",
 		Text:    html.EscapeString(message.Message),
 	}
@@ -507,7 +630,7 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 	if len(message.MentionNotify) > 0 {
 		for _, name := range message.MentionNotify {
 			logger.Debug.Println("Requested to mention:", name)
-			if user, ok := slack.usersByName[name]; ok {
+			if user, ok := slack.userByName[name]; ok {
 				logger.Debug.Println("Mention user found:", user.Name)
 				slackMsg.Text += " <@" + user.ID + ">"
 			}

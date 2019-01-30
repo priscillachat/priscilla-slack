@@ -467,16 +467,27 @@ func (slack *slackClient) keepAlive(trigger chan<- bool) {
 }
 
 func (slack *slackClient) listen(msgOut chan<- *slackMessage) {
-	for err := slack.connect(); err != nil; err = slack.connect() {
-		logger.Error.Println("Slack connect failure:", err)
-		logger.Warn.Println("Sleeping 10 seconds before retry...")
-		time.Sleep(10 * time.Second)
-	}
-
+	var err error
+	init := true
 	for {
+		if init || err != nil {
+			for err := slack.connect(); err != nil; err = slack.connect() {
+				logger.Error.Println("Slack connect failure:", err)
+				logger.Warn.Println("Sleeping 10 seconds before retry...")
+				time.Sleep(10 * time.Second)
+			}
+			init = false
+		}
+
 		msg := new(slackMessage)
-		websocket.JSON.Receive(slack.ws, msg)
-		msgOut <- msg
+		err = websocket.JSON.Receive(slack.ws, msg)
+		if err == nil {
+			msgOut <- msg
+		} else {
+			logger.Error.Println("Websocket error, wait 10s before reconnect",
+				err)
+			time.Sleep(10 * time.Second)
+		}
 	}
 }
 
@@ -624,7 +635,7 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 		ID:      slack.messageCounter,
 		Channel: slack.conversationByName[message.Room].ID,
 		Type:    "message",
-		Text:    html.EscapeString(message.Message),
+		Text:    message.Message,
 	}
 
 	if len(message.MentionNotify) > 0 {

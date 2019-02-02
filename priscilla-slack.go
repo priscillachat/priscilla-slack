@@ -479,13 +479,26 @@ func (slack *slackClient) listen(msgOut chan<- *slackMessage) {
 			init = false
 		}
 
-		msg := new(slackMessage)
-		err = slack.ws.ReadJSON(msg)
+		var buf []byte
+		var messageType int
+		messageType, buf, err = slack.ws.ReadMessage()
+		logger.Debug.Println("Message received:", string(buf[:]))
+
+		if messageType != websocket.TextMessage {
+			logger.Debug.Println("Received message type:", messageType)
+			continue
+		}
+
 		if err == nil {
-			msgOut <- msg
+			msg := new(slackMessage)
+			jsonError := json.Unmarshal(buf, msg)
+			if jsonError == nil {
+				msgOut <- msg
+			} else {
+				logger.Warn.Println("JSON decode error:", err)
+			}
 		} else {
-			logger.Error.Println("Websocket error, wait 60s before reconnect:",
-				err)
+			logger.Error.Println("Websocket error, wait 60s reconnect:", err)
 			time.Sleep(60 * time.Second)
 		}
 

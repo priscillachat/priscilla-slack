@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/priscillachat/prisclient"
 	"github.com/priscillachat/prislog"
-	"golang.org/x/net/websocket"
 	"gopkg.in/yaml.v2"
 )
 
@@ -47,7 +47,7 @@ type slackConversation struct {
 	IsGroup   bool   `json:"is_group"`
 	IsIm      bool   `json:"is_im"`
 	IsMember  bool   `json:"is_member"`
-	IsPrivate bool   `json:"is_private`
+	IsPrivate bool   `json:"is_private"`
 	IsMpim    bool   `json:"is_mpim"`
 }
 
@@ -302,7 +302,7 @@ func run() {
 	go priscilla.Run(toPris, fromPris)
 
 	keepAlive := make(chan bool)
-	go slack.keepAlive(keepAlive)
+	//go slack.keepAlive(keepAlive)
 
 	for {
 		select {
@@ -382,7 +382,7 @@ func run() {
 				slack.sendMessage(query.Message)
 			}
 		case <-keepAlive:
-			websocket.JSON.Send(slack.ws, slackPing{Type: "ping"})
+			slack.ws.WriteJSON(slackPing{Type: "ping"})
 		}
 	}
 }
@@ -442,7 +442,7 @@ func (slack *slackClient) connect() error {
 	logger.Debug.Println("Bot name:", slack.name)
 	logger.Debug.Println("Bot ID:", slack.id)
 
-	slack.ws, err = websocket.Dial(connectObject.URL, "", SlackAPI)
+	slack.ws, _, err = websocket.DefaultDialer.Dial(connectObject.URL, nil)
 
 	if err != nil {
 		logger.Error.Println("Error connecting to websocket:", err)
@@ -474,20 +474,21 @@ func (slack *slackClient) listen(msgOut chan<- *slackMessage) {
 			for err := slack.connect(); err != nil; err = slack.connect() {
 				logger.Error.Println("Slack connect failure:", err)
 				logger.Warn.Println("Sleeping 10 seconds before retry...")
-				time.Sleep(10 * time.Second)
+				time.Sleep(60 * time.Second)
 			}
 			init = false
 		}
 
 		msg := new(slackMessage)
-		err = websocket.JSON.Receive(slack.ws, msg)
+		err = slack.ws.ReadJSON(msg)
 		if err == nil {
 			msgOut <- msg
 		} else {
-			logger.Error.Println("Websocket error, wait 10s before reconnect",
+			logger.Error.Println("Websocket error, wait 60s before reconnect:",
 				err)
-			time.Sleep(10 * time.Second)
+			time.Sleep(60 * time.Second)
 		}
+
 	}
 }
 
@@ -648,5 +649,5 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 		}
 	}
 
-	return websocket.JSON.Send(slack.ws, &slackMsg)
+	return slack.ws.WriteJSON(&slackMsg)
 }

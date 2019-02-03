@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -111,6 +112,11 @@ type slackMessage struct {
 	Timestamp string `json:"ts,omitempty"`
 }
 
+type slackMessageRest struct {
+	Channel     string `json:"channel"`
+	Text        string `json:"text"`
+	DisplayName string `json:"username"`
+}
 type config struct {
 	Port     int                      `yaml:"port"`
 	Secret   string                   `yaml:"secret"`
@@ -512,6 +518,12 @@ func (slack *slackClient) apiGet(path string,
 	}
 
 	req, err := http.NewRequest("GET", SlackAPI+path, nil)
+
+	if err != nil {
+		logger.Error.Println("Error creating new API request:", err)
+		return nil, err
+	}
+
 	q := req.URL.Query()
 	q.Add("token", slack.token)
 
@@ -538,6 +550,40 @@ func (slack *slackClient) apiGet(path string,
 	}
 
 	return ioutil.ReadAll(resp.Body)
+}
+
+func (slack *slackClient) apiPost(path string, payload []byte) error {
+	if slack.api == nil {
+		slack.api = &http.Client{}
+	}
+
+	req, err := http.NewRequest("POST", SlackAPI+path, bytes.NewBuffer(payload))
+
+	if err != nil {
+		logger.Error.Println("Error creating new API request:", err)
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+slack.token)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	resp, err := slack.api.Do(req)
+
+	if err != nil {
+		logger.Error.Println("Error calling slack API", path, ":", err)
+		return err
+	}
+
+	logger.Debug.Println("API POST called:", path, string(payload))
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		logger.Error.Println("API POST return non-200:", resp.StatusCode)
+		return errors.New("API POST did not return 200")
+	}
+
+	return nil
 }
 
 func (slack *slackClient) populateUser(id string) error {
@@ -652,9 +698,23 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 		Text:    message.Message,
 	}
 
+	// replace special mentions in text
+	slackMsg.Text = strings.Replace(slackMsg.Text, "@here", "<!here>", -1)
+	slackMsg.Text = strings.Replace(slackMsg.Text, "@channel", "<!channel>", -1)
+
 	if len(message.MentionNotify) > 0 {
 		for _, name := range message.MentionNotify {
 			logger.Debug.Println("Requested to mention:", name)
+
+			// Special mention in slack
+			if name == "@here" || name == "@channel" {
+				logger.Debug.Println("Requested to special mention:", name)
+				slackMsg.Text += " <!" + name[1:] + ">"
+				continue
+			}
+
+			// TODO: currently it can only mention users it has seen, a lookup
+			// on slack API could be used to resolve this
 			if user, ok := slack.userByName[name]; ok {
 				logger.Debug.Println("Mention user found:", user.Name)
 				slackMsg.Text += " <@" + user.ID + ">"
@@ -662,5 +722,29 @@ func (slack *slackClient) sendMessage(message *prisclient.MessageBlock) error {
 		}
 	}
 
-	return slack.ws.WriteJSON(&slackMsg)
+	if message.DisplayName == "" {
+		debugPayload, _ := json.Marshal(slackMsg)
+		logger.Debug.Println("Message payload:", string(debugPayload))
+
+		return slack.ws.WriteJSON(&slackMsg)
+	} else {
+		if _, ok := slack.conversationByName[message.Room]; !ok {
+			slack.populateConversations()
+		}
+
+		channel, ok := slack.conversationByName[message.Room]
+
+		if !ok {
+			return errors.New("Unknown channel")
+		}
+
+		payload, _ := json.Marshal(slackMessageRest{
+			Channel:     channel.ID,
+			Text:        message.Message,
+			DisplayName: message.DisplayName,
+		})
+		logger.Debug.Println("POST API message payload:", payload)
+
+		return slack.apiPost("chat.postMessage", payload)
+	}
 }
